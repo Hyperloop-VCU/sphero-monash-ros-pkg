@@ -19,13 +19,18 @@ ros-humble-rclpy = "*"
 ros-humble-robot-state-publisher = "*"
 ros-humble-geometry-msgs = "*"
 ros-humble-nav-msgs = "*"
+ros-humble-sensor-msgs = "*"
+ros-humble-std-msgs = "*"
 ros-humble-tf2-ros = "*"
+
+[pypi-dependencies]
+sphero-unsw = "==0.1.11"
 
 [tasks]
 sim-node = "PYTHONPATH=src python -m sphero_ros.nodes.sim_wrapper_node"
 robot-node = "PYTHONPATH=src python -m sphero_ros.nodes.robot_wrapper_node"
 teleop-node = "PYTHONPATH=src python -m sphero_ros.nodes.teleop_node"
 sim-launch = "ros2 launch ./launch/sphero_sim.launch.py"
-robot-launch = "ros2 launch ./launch/sphero_robot.launch.py"
+viz-launch = "ros2 launch ./launch/sphero_robot.launch.py"
 rviz = "rviz2 -d rviz/sphero_pose.rviz"
 develop = "pip install -e ."

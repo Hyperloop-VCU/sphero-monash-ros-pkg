@@ -7,11 +7,17 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import OccupancyGrid, Odometry
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
 
 from sphero_env.envs.maze_generator import MazeGenerator, grid_to_world
 from sphero_env.envs.sphero_env import SpheroEnv
-from sphero_ros.conversions import env_heading_to_ros_yaw, quaternion_from_yaw, ros_yaw_to_env_heading, wrap_angle
+from sphero_ros.conversions import (
+    env_heading_to_ros_yaw,
+    quaternion_from_yaw,
+    ros_velocity_to_env_action,
+    wrap_angle,
+)
 
 
 class SpheroSimWrapperNode(Node):
@@ -85,6 +91,7 @@ class SpheroSimWrapperNode(Node):
         self.declare_parameter("pose_topic", "/sphero/pose")
         self.declare_parameter("odom_topic", "/sphero/odom")
         self.declare_parameter("map_topic", "/sphero/map")
+        self.declare_parameter("collision_topic", "/sphero/collision")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
 
@@ -105,6 +112,7 @@ class SpheroSimWrapperNode(Node):
         self.pose_topic = str(self.get_parameter("pose_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
         self.map_topic = str(self.get_parameter("map_topic").value)
+        self.collision_topic = str(self.get_parameter("collision_topic").value)
         self.map_frame = str(self.get_parameter("map_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
 
@@ -162,12 +170,12 @@ class SpheroSimWrapperNode(Node):
             raise RuntimeError("Spawn pose resolved to an occupied cell; aborting startup.")
 
         self._cmd_linear_x: float = 0.0
-        self._cmd_angular_z: float = 0.0
-        self._target_yaw: float = 0.0
+        self._cmd_linear_y: float = 0.0
         self._last_published_yaw: Optional[float] = None
 
         self._pose_pub = self.create_publisher(PoseStamped, self.pose_topic, 10)
         self._odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
+        self._collision_pub = self.create_publisher(Bool, self.collision_topic, 10)
         map_qos = QoSProfile(depth=1)
         map_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         map_qos.reliability = ReliabilityPolicy.RELIABLE
@@ -180,7 +188,8 @@ class SpheroSimWrapperNode(Node):
         self._timer = self.create_timer(dt, self._on_timer)
 
         self.get_logger().info(
-            f"Sim wrapper started. Subscribing {self.cmd_vel_topic}, publishing {self.pose_topic}, {self.odom_topic}, and {self.map_topic}."
+            f"Sim wrapper started. Subscribing {self.cmd_vel_topic}, publishing "
+            f"{self.pose_topic}, {self.odom_topic}, {self.map_topic}, and {self.collision_topic}."
         )
 
     def _publish_map(self):
@@ -209,12 +218,13 @@ class SpheroSimWrapperNode(Node):
 
     def _on_twist(self, msg: Twist):
         self._cmd_linear_x = float(msg.linear.x)
-        self._cmd_angular_z = float(msg.angular.z)
+        self._cmd_linear_y = float(msg.linear.y)
 
     def _on_timer(self):
-        self._target_yaw = wrap_angle(self._target_yaw + self._cmd_angular_z * self.env.dt)
-        env_heading = ros_yaw_to_env_heading(self._target_yaw)
-        action = np.array([self._cmd_linear_x, env_heading], dtype=np.float32)
+        speed, env_heading = ros_velocity_to_env_action(
+            self._cmd_linear_x, self._cmd_linear_y
+        )
+        action = np.array([speed, env_heading], dtype=np.float32)
 
         _, _, _, _, info = self.env.step(action)
 
@@ -254,6 +264,10 @@ class SpheroSimWrapperNode(Node):
             odom_msg.twist.twist.angular.z = yaw_delta / self.env.dt
         self._last_published_yaw = yaw_ros
         self._odom_pub.publish(odom_msg)
+
+        collision_msg = Bool()
+        collision_msg.data = bool(info.get("collision", False))
+        self._collision_pub.publish(collision_msg)
 
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp

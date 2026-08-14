@@ -8,6 +8,8 @@ Control and state interfaces follow standard ROS conventions:
 3. Output odometry topic: nav_msgs/Odometry on /sphero/odom
 4. Output map topic: nav_msgs/OccupancyGrid on /sphero/map
 5. Output transform: map -> base_link via TF
+6. Real robot IMU topic: sensor_msgs/Imu on /sphero/imu
+7. Real robot collision topic: std_msgs/Bool on /sphero/collision
 
 ![RViz simulator motion](docs/images/rviz_sim_motion.png)
 
@@ -47,10 +49,10 @@ Start real robot wrapper node:
 pixi run robot-node
 ```
 
-Start real robot wrapper with RViz:
+Start the real robot visualization launch (in a separate terminal):
 
 ```bash
-pixi run robot-launch
+pixi run viz-launch
 ```
 
 Start keyboard teleop node:
@@ -59,13 +61,33 @@ Start keyboard teleop node:
 pixi run teleop-node
 ```
 
+Teleop publishes planar velocity vectors using the `qwe/asd` layout: lowercase
+`q/w/e` are forward-left/forward/forward-right, `a/s/d` are left/backward/right,
+`+/-` adjust speed, `SPACE` stops, and uppercase `Q` quits. The wrappers
+convert `linear.x/y` into Sphero speed magnitude and heading; `angular.z` is
+ignored.
+
+The real robot node must be run separately because its Sphero scanner is
+interactive. Use three terminals:
+
+1. `pixi run robot-node` scans for and connects to the robot.
+2. `pixi run viz-launch` starts `robot_state_publisher` and RViz without taking
+   over terminal input.
+3. `pixi run teleop-node` reads keyboard commands and publishes `/cmd_vel`.
+
 ## ROS Nodes
 
 1. sphero_ros.nodes.sim_wrapper_node
 2. sphero_ros.nodes.robot_wrapper_node
 3. sphero_ros.nodes.teleop_node
 
-Both nodes subscribe to /cmd_vel and publish /sphero/pose, /sphero/odom, and TF.
+Both nodes subscribe to /cmd_vel and publish /sphero/pose, /sphero/odom,
+/sphero/collision, and TF.
+
+The real robot wrapper additionally publishes the Sphero acceleration, gyroscope,
+and orientation data as `/sphero/imu` in SI units (`m/s^2`, `rad/s`, and a
+quaternion), with `base_link` as the frame. The simulator publishes the same
+collision topic from its contact model.
 
 The simulator uses a generated maze by default and publishes it as /sphero/map.
 

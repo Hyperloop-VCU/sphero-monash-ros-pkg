@@ -6,15 +6,23 @@ import rclpy
 from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
+from sensor_msgs.msg import Imu
+from std_msgs.msg import Bool
 from tf2_ros import TransformBroadcaster
 
 from sphero_env.robot.connect import scan_and_connect
 from sphero_env.robot.robot import Robot
-from sphero_ros.conversions import env_heading_to_ros_yaw, quaternion_from_yaw, ros_yaw_to_env_heading, wrap_angle
+from sphero_ros.conversions import (
+    env_heading_to_ros_yaw,
+    quaternion_from_euler,
+    quaternion_from_yaw,
+    ros_velocity_to_env_action,
+    wrap_angle,
+)
 
 
 class SpheroRobotWrapperNode(Node):
-    def __init__(self):
+    def __init__(self, api):
         super().__init__("sphero_robot_wrapper")
 
         self.declare_parameter("dt", 0.01)
@@ -25,6 +33,8 @@ class SpheroRobotWrapperNode(Node):
         self.declare_parameter("cmd_vel_topic", "/cmd_vel")
         self.declare_parameter("pose_topic", "/sphero/pose")
         self.declare_parameter("odom_topic", "/sphero/odom")
+        self.declare_parameter("imu_topic", "/sphero/imu")
+        self.declare_parameter("collision_topic", "/sphero/collision")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
 
@@ -37,13 +47,13 @@ class SpheroRobotWrapperNode(Node):
         self.cmd_vel_topic = str(self.get_parameter("cmd_vel_topic").value)
         self.pose_topic = str(self.get_parameter("pose_topic").value)
         self.odom_topic = str(self.get_parameter("odom_topic").value)
+        self.imu_topic = str(self.get_parameter("imu_topic").value)
+        self.collision_topic = str(self.get_parameter("collision_topic").value)
         self.map_frame = str(self.get_parameter("map_frame").value)
         self.base_frame = str(self.get_parameter("base_frame").value)
 
-        toy, api_context = scan_and_connect()
-        self.get_logger().info(f"Connected to {toy.name}")
-        self._api_context = api_context
-        self._api = self._api_context.__enter__()
+        self._api = api
+        self.get_logger().info("Sphero API session opened; initializing robot state...")
 
         self.robot = Robot(
             api=self._api,
@@ -54,31 +64,35 @@ class SpheroRobotWrapperNode(Node):
             render_mode=None,
         )
         self.robot.reset()
+        self.get_logger().info("Robot state initialized; starting ROS publishers and timer...")
 
         self._cmd_linear_x: float = 0.0
-        self._cmd_angular_z: float = 0.0
-        self._target_yaw: float = 0.0
+        self._cmd_linear_y: float = 0.0
         self._last_published_yaw: Optional[float] = None
 
         self._pose_pub = self.create_publisher(PoseStamped, self.pose_topic, 10)
         self._odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
+        self._imu_pub = self.create_publisher(Imu, self.imu_topic, 10)
+        self._collision_pub = self.create_publisher(Bool, self.collision_topic, 10)
         self._tf_broadcaster = TransformBroadcaster(self)
 
         self.create_subscription(Twist, self.cmd_vel_topic, self._on_twist, 10)
         self._timer = self.create_timer(dt, self._on_timer)
 
         self.get_logger().info(
-            f"Robot wrapper started. Subscribing {self.cmd_vel_topic}, publishing {self.pose_topic} and {self.odom_topic}."
+            f"Robot wrapper started. Subscribing {self.cmd_vel_topic}, publishing "
+            f"{self.pose_topic}, {self.odom_topic}, {self.imu_topic}, and {self.collision_topic}."
         )
 
     def _on_twist(self, msg: Twist):
         self._cmd_linear_x = float(msg.linear.x)
-        self._cmd_angular_z = float(msg.angular.z)
+        self._cmd_linear_y = float(msg.linear.y)
 
     def _on_timer(self):
-        self._target_yaw = wrap_angle(self._target_yaw + self._cmd_angular_z * self.robot.dt)
-        env_heading = ros_yaw_to_env_heading(self._target_yaw)
-        action = np.array([self._cmd_linear_x, env_heading], dtype=np.float32)
+        speed, env_heading = ros_velocity_to_env_action(
+            self._cmd_linear_x, self._cmd_linear_y
+        )
+        action = np.array([speed, env_heading], dtype=np.float32)
 
         _, _, _, _, info = self.robot.step(action)
 
@@ -119,6 +133,12 @@ class SpheroRobotWrapperNode(Node):
         self._last_published_yaw = yaw_ros
         self._odom_pub.publish(odom_msg)
 
+        self._publish_imu(info, stamp)
+
+        collision_msg = Bool()
+        collision_msg.data = bool(info.get("collision", False))
+        self._collision_pub.publish(collision_msg)
+
         tf_msg = TransformStamped()
         tf_msg.header.stamp = stamp
         tf_msg.header.frame_id = self.map_frame
@@ -132,23 +152,53 @@ class SpheroRobotWrapperNode(Node):
         tf_msg.transform.rotation.w = qw
         self._tf_broadcaster.sendTransform(tf_msg)
 
+    def _publish_imu(self, info, stamp):
+        imu_msg = Imu()
+        imu_msg.header.stamp = stamp
+        imu_msg.header.frame_id = self.base_frame
+
+        acceleration = info.get("acceleration") or {}
+        imu_msg.linear_acceleration.x = float(acceleration.get("x", 0.0)) * 9.80665
+        imu_msg.linear_acceleration.y = float(acceleration.get("y", 0.0)) * 9.80665
+        imu_msg.linear_acceleration.z = float(acceleration.get("z", 0.0)) * 9.80665
+
+        gyroscope = info.get("gyroscope") or {}
+        imu_msg.angular_velocity.x = math.radians(float(gyroscope.get("x", gyroscope.get("pitch", 0.0))))
+        imu_msg.angular_velocity.y = math.radians(float(gyroscope.get("y", gyroscope.get("roll", 0.0))))
+        imu_msg.angular_velocity.z = math.radians(float(gyroscope.get("z", gyroscope.get("yaw", 0.0))))
+
+        orientation = info.get("orientation") or {}
+        roll = math.radians(float(orientation.get("roll", orientation.get("x", 0.0))))
+        pitch = math.radians(float(orientation.get("pitch", orientation.get("y", 0.0))))
+        yaw = math.radians(float(orientation.get("yaw", orientation.get("z", 0.0))))
+        qx, qy, qz, qw = quaternion_from_euler(roll, pitch, yaw)
+        imu_msg.orientation.x = qx
+        imu_msg.orientation.y = qy
+        imu_msg.orientation.z = qz
+        imu_msg.orientation.w = qw
+
+        self._imu_pub.publish(imu_msg)
+
     def destroy_node(self):
-        self.robot.emergency_stop()
         self.robot.close()
-        if self._api_context is not None:
-            self._api_context.__exit__(None, None, None)
         super().destroy_node()
 
 
 def main(args=None):
     rclpy.init(args=args)
-    node = SpheroRobotWrapperNode()
+    node = None
     try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        pass
+        toy, api_context = scan_and_connect()
+        print(f"Connected to {toy.name}", flush=True)
+        with api_context as api:
+            node = SpheroRobotWrapperNode(api)
+            try:
+                rclpy.spin(node)
+            except KeyboardInterrupt:
+                pass
+            finally:
+                node.destroy_node()
     finally:
-        node.destroy_node()
         rclpy.shutdown()
 
 

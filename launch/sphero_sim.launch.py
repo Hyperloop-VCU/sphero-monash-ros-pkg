@@ -3,6 +3,7 @@ from launch.actions import DeclareLaunchArgument, ExecuteProcess
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 import os
+import sys
 
 
 def generate_launch_description():
@@ -19,7 +20,7 @@ def generate_launch_description():
             DeclareLaunchArgument("use_rviz", default_value="true"),
             DeclareLaunchArgument("rviz_config", default_value=default_rviz),
             ExecuteProcess(
-                cmd=["python", "-m", "sphero_ros.nodes.sim_wrapper_node"],
+                cmd=[sys.executable, "-m", "sphero_ros.nodes.sim_wrapper_node"],
                 additional_env={"PYTHONPATH": pythonpath},
                 output="screen",
             ),

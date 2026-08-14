@@ -8,6 +8,7 @@ import numpy as np
 
 from sphero_env.logging_utils import CsvStepLogger
 from sphero_unsw.sphero_edu import SpheroEduAPI
+from sphero_unsw.types import Color
 
 
 class Robot(gym.Env):
@@ -58,6 +59,7 @@ class Robot(gym.Env):
         super().__init__()
 
         self.api = api
+        self.api.set_matrix_character("M", Color(255, 255, 255))
 
         # Logging + visualization settings
         self.last_command = None  # (heading_cmd_rad, speed_cmd_norm, timestamp)
@@ -492,15 +494,21 @@ class Robot(gym.Env):
 
     def set_heading_and_speed(self, heading_deg: float, speed: int):
         """
-        Send heading and speed command to real robot.
+        Send one combined heading and speed command to the real robot.
         
         Args:
             heading_deg: Heading in degrees (0=forward, 90=right, 180=backward, 270=left)
             speed: Speed command in [0, 255]
         """
         with self._lock:
-            self.api.set_heading(int(heading_deg))
-            self.api.set_speed(int(np.clip(speed, 0, 255)))
+            heading = int(heading_deg) % 360
+            speed_raw = int(np.clip(speed, 0, 255))
+            toy = getattr(self.api, "_SpheroEduAPI__toy", None)
+            if toy is None or not hasattr(toy, "drive_control"):
+                self.api.set_heading(heading)
+                self.api.set_speed(speed_raw)
+                return
+            toy.drive_control.roll_start(heading, speed_raw)
 
     def emergency_stop(self):
         """

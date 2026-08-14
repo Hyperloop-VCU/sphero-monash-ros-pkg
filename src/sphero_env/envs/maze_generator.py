@@ -100,7 +100,9 @@ class MazeGenerator:
 
         target_n = max(5, max(self.width, self.height))
         grid = np.ones((target_n, target_n), dtype=np.uint8)
-        corridor_half_width = max(0, target_n // 40)
+        # Keep corridors at least 3 cells wide (half-width=1) so robot start
+        # and motion are visually and physically separated from walls.
+        corridor_half_width = max(1, target_n // 40)
 
         def carve_square(row: int, col: int):
             r0 = max(1, row - corridor_half_width)

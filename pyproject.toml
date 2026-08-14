@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sphero_monash"
 version = "0.1.0"
-description = "Sphero robot gym-like environment for intelligent robotics teaching. To be used alongside Sphero unsw."
+description = "ROS 2 wrapper for Sphero simulator and hardware with Twist/Odometry interfaces."
 readme = "README.md"
 requires-python = ">=3.9,<3.13"
 license = { text = "MIT" }

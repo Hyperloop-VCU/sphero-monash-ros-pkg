@@ -6,7 +6,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
-from sphero_env.envs.visualiser import Visualiser
+from sphero_env.logging_utils import CsvStepLogger
 from sphero_unsw.sphero_edu import SpheroEduAPI
 
 
@@ -135,16 +135,9 @@ class Robot(gym.Env):
             dtype=np.float32,
         )
 
-        self.vis = Visualiser(
-            world_width=self.world_width,
-            world_height=self.world_height,
-            goal_pos=self.goal_pos,
-            render_mode=render_mode,
-            window_size=window_size,
-            occupancy_grid=None,
-            grid_resolution=0.1,
-            csv_path=csv_path,
-        )
+        _ = render_mode
+        _ = window_size
+        self.vis = CsvStepLogger(goal_pos=self.goal_pos, csv_path=csv_path)
 
     def start_logging(self):
         self.vis.start_logging()
@@ -153,7 +146,7 @@ class Robot(gym.Env):
         self.vis.stop_logging()
 
     def set_log_path(self, csv_path: Optional[str]):
-        """Set/override CSV log path for the internal visualiser."""
+        """Set/override CSV log path for the internal logger."""
         self.vis.csv_path = csv_path
 
     def set_current_setpoint(self, setpoint_xy: Optional[np.ndarray]):
@@ -186,17 +179,9 @@ class Robot(gym.Env):
         est_mean: Optional[np.ndarray] = None,
         est_cov: Optional[np.ndarray] = None,
     ):
-        """Backward-compatible wrapper; logging now happens in step()."""
+        """Update estimator belief wrapper."""
         _ = action
         self.update_estimate(est_mean=est_mean, est_cov=est_cov)
-
-    def get_live_traj(self):
-        """Get current trajectory data.
-
-        Returns:
-            traj_x, traj_y, None.
-        """
-        return self.vis.get_traj()
 
     @staticmethod
     def _wrap_angle(angle: float) -> float:
@@ -208,7 +193,7 @@ class Robot(gym.Env):
         """Convert hardware heading in degrees to wrapped radians."""
         return Robot._wrap_angle(np.deg2rad(float(heading_deg)))
 
-    # ---- Core API (matching SpheroEnv interface) ---- #
+    # ---- Core API ---- #
 
     def reset(
         self,
@@ -452,7 +437,7 @@ class Robot(gym.Env):
 
         return obs, None, terminated, truncated, info
     
-    # ---- Interface compatibility methods ---- #
+    # ---- Interface methods ---- #
 
     def _get_observation(self) -> np.ndarray:
         """
@@ -492,7 +477,7 @@ class Robot(gym.Env):
 
     def render(self):
         """
-        Delegate rendering to the shared visualiser.
+        No-op render hook maintained for interface compatibility.
         """
         self.vis.render(self.state_true, self.state_odom)
 

@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<robot name="sphero_bolt_plus">
+  <!-- Sphero BOLT+ diameter: 73 mm -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.0365"/>
+      </geometry>
+      <material name="sphero_shell">
+        <color rgba="0.98 0.98 0.98 1.0"/>
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.0365"/>
+      </geometry>
+    </collision>
+  </link>
+</robot>

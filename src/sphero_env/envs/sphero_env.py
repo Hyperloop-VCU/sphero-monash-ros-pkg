@@ -6,7 +6,7 @@ import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
 
-from sphero_env.envs.visualiser import Visualiser
+from sphero_env.logging_utils import CsvStepLogger
 
 
 class SpheroEnv(gym.Env):
@@ -58,13 +58,9 @@ class SpheroEnv(gym.Env):
                 - Time limit (max_steps -> truncated)
             Goal reach is reported in info["reached_goal"] but does not terminate.
 
-    Rendering (when render_mode="human"):
-        - World rectangle
-        - Obstacles (occupancy grid)
-        - Goal
-        - True pose (green)
-        - Odom / measured pose (blue)
-        - Optional belief mean + covariance ellipse (magenta) via set_belief()
+    Rendering:
+        - No in-process UI renderer is used.
+        - This backend now supports logging/state APIs for ROS wrappers.
     """
 
     metadata = {"render_modes": ["human"], "render_fps": 60}
@@ -169,17 +165,9 @@ class SpheroEnv(gym.Env):
         # Collision flag carried into observation (0 or 1)
         self.last_collision_flag: float = 0.0
 
-        # Visualiser handles logging + rendering for both sim and real workflows.
-        self.vis = Visualiser(
-            world_width=self.world_width,
-            world_height=self.world_height,
-            goal_pos=self.goal_pos,
-            render_mode=render_mode,
-            window_size=window_size,
-            occupancy_grid=self.occupancy_grid,
-            grid_resolution=self.grid_resolution,
-            csv_path=self.csv_path,
-        )
+        _ = render_mode
+        _ = window_size
+        self.vis = CsvStepLogger(goal_pos=self.goal_pos, csv_path=self.csv_path)
 
         # ---- Gym spaces ----
 
@@ -214,7 +202,7 @@ class SpheroEnv(gym.Env):
         self.vis.stop_logging()
 
     def set_log_path(self, csv_path: Optional[str]):
-        """Set/override CSV log path for the internal visualiser."""
+        """Set/override CSV log path for the internal logger."""
         self.vis.csv_path = csv_path
 
     def set_current_setpoint(self, setpoint_xy: Optional[np.ndarray]):
@@ -247,7 +235,7 @@ class SpheroEnv(gym.Env):
         est_mean: Optional[np.ndarray] = None,
         est_cov: Optional[np.ndarray] = None,
     ):
-        """Backward-compatible wrapper; logging now happens in step()."""
+        """Update estimator belief wrapper."""
         _ = action
         self.update_estimate(est_mean=est_mean, est_cov=est_cov)
 
@@ -257,7 +245,7 @@ class SpheroEnv(gym.Env):
         gt_pos: np.ndarray,
         est_pos: np.ndarray,
     ):
-        """Backward-compatible EKF logging wrapper via Visualiser."""
+        """Backward-compatible EKF logging wrapper."""
         gt_pos = np.asarray(gt_pos, dtype=np.float32).reshape(-1)
         est_pos = np.asarray(est_pos, dtype=np.float32).reshape(-1)
         if gt_pos.shape[0] != 2 or est_pos.shape[0] != 2:
@@ -273,9 +261,6 @@ class SpheroEnv(gym.Env):
             est_cov=P,
             setpoint=self.current_setpoint,
         )
-
-    def get_live_traj(self):
-        return self.vis.get_traj()
 
     # ---------------- Core API ---------------- #
 
@@ -298,16 +283,40 @@ class SpheroEnv(gym.Env):
 
         rng = self.np_random
 
-        # # Sample initial position near origin avoiding obstacles if possible
-        # for _ in range(100):
-        #     x0 = float(rng.uniform(-0.5, 0.5))
-        #     y0 = float(rng.uniform(-0.5, 0.5))
-        #     if not self._is_collision(x0, y0):
-        #         break
-        # else:
-        x0, y0 = 0.0, 0.0
+        opts = options or {}
+        init_pose = opts.get("init_pose")
 
-        heading0 = float(rng.uniform(-np.pi, np.pi))
+        if init_pose is not None:
+            init_arr = np.asarray(init_pose, dtype=np.float32).reshape(-1)
+            if init_arr.shape[0] < 2:
+                raise ValueError("options['init_pose'] must contain at least [x, y].")
+            x0 = float(init_arr[0])
+            y0 = float(init_arr[1])
+            heading0 = (
+                self._wrap_angle(float(init_arr[2]))
+                if init_arr.shape[0] >= 3
+                else float(rng.uniform(-np.pi, np.pi))
+            )
+            if self._is_collision(x0, y0):
+                raise ValueError("options['init_pose'] is inside an obstacle.")
+        else:
+            # Prefer a random free spawn if a map is present.
+            if self.occupancy_grid is not None:
+                x0 = 0.0
+                y0 = 0.0
+                if self._is_collision(x0, y0):
+                    free_cells = np.argwhere(self.occupancy_grid == 0)
+                    if free_cells.size == 0:
+                        raise RuntimeError("occupancy_grid has no free cells for reset spawn.")
+                    i, j = free_cells[rng.integers(0, len(free_cells))]
+                    h, w = self.occupancy_grid.shape
+                    x0 = (float(j) + 0.5 - (w / 2.0)) * self.grid_resolution
+                    y0 = ((h / 2.0) - (float(i) + 0.5)) * self.grid_resolution
+            else:
+                x0, y0 = 0.0, 0.0
+
+            heading0 = float(rng.uniform(-np.pi, np.pi))
+
         speed0 = 0.0
 
         # No collision at reset
@@ -462,7 +471,6 @@ class SpheroEnv(gym.Env):
         truncated = False
 
         if not (self.x_min <= x_new <= self.x_max and self.y_min <= y_new <= self.y_max):
-            terminated = True
             out_of_bounds = True
 
         dist_to_goal = float(
@@ -572,22 +580,6 @@ class SpheroEnv(gym.Env):
 
         self.vis.set_belief(mean, cov)
 
-    def set_distance_map(self, dist_map: np.ndarray):
-        """
-        Set a distance map for visualization (e.g., BFS distance to goal).
-
-        dist_map:
-            - shape matching occupancy_grid (h, w)
-            - values: distance in cells, np.inf for unreachable
-
-        This is only used for rendering a heatmap; it does not affect dynamics.
-        """
-        dist_map = np.asarray(dist_map, dtype=np.float32)
-        if self.occupancy_grid is not None:
-            if dist_map.shape != self.occupancy_grid.shape:
-                raise ValueError("dist_map shape must match occupancy_grid shape.")
-        self.vis.set_distance_map(dist_map)
-
     # --------------- Occupancy / collision --------------- #
 
     def _is_collision(self, x: float, y: float) -> bool:
@@ -643,75 +635,12 @@ class SpheroEnv(gym.Env):
         # Fallback: if none of the substeps were in collision, just return new
         return x_new, y_new
 
-
-    def set_overlay_trajectories(
-        self,
-        real_traj=None,
-        odom_traj=None,
-        true_traj=None,
-    ):
-        """
-        Set optional trajectory overlays for pygame rendering.
-
-        Each input should be:
-            - None, or
-            - array-like of shape (N,2) in world coordinates
-        """
-        self.vis.set_overlay_trajectories(real=real_traj, odom=odom_traj, true=true_traj)
-
     # --------------- Rendering --------------- #
 
     def render(self):
-        """Render the environment via Visualiser."""
+        """No-op render hook maintained for interface compatibility."""
         self.vis.render(self.state_true, self.state_odom)
 
     def close(self):
         """Close the environment and clean up resources."""
         self.vis.close()
-
-
-# Quick manual demo
-def run_manual():
-    import numpy as np
-
-    H, W = 50, 50
-    occ = np.zeros((H, W), dtype=np.uint8)
-    # Simple wall
-    occ[:, W // 2] = 1
-    gap_row = H // 2
-    occ[gap_row - 2: gap_row + 3, W // 2] = 0
-
-    env = SpheroEnv(
-        render_mode="human",
-        world_width=10.0,
-        world_height=10.0,
-        occupancy_grid=occ,
-        grid_resolution=0.2,
-        goal_pos=(3.0, 3.0),
-    )
-
-    obs, info = env.reset()
-
-    # Example: fake belief that slowly tracks odom/obs
-    belief_mean = obs.copy()
-    belief_cov = np.diag([0.2, 0.2, 0.5, 0.5]).astype(np.float32)
-    env.set_belief(belief_mean, belief_cov)
-
-    while True:
-        action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-
-        # Toy "filter": move belief a bit toward observation
-        belief_mean = 0.9 * belief_mean + 0.1 * obs
-        env.set_belief(belief_mean, belief_cov)
-
-        env.render()
-
-        if terminated or truncated:
-            obs, info = env.reset()
-            belief_mean = obs.copy()
-            env.set_belief(belief_mean, belief_cov)
-
-
-if __name__ == "__main__":
-    run_manual()

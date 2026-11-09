@@ -1,5 +1,0 @@
-gymnasium>=0.29
-numpy
-sphero-unsw==0.1.11
-pandas
-pytest

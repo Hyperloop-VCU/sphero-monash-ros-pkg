@@ -7,8 +7,15 @@ from geometry_msgs.msg import PoseStamped, TransformStamped, Twist
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Bool
+from std_msgs.msg import Bool, ColorRGBA, String
 from tf2_ros import TransformBroadcaster
+from sphero_unsw.commands.io import IO
+from sphero_unsw.controls.v2 import Processors
+from sphero_unsw.toy.boltplus import BOLTPLUS
+from sphero_unsw.types import Color
+
+BOLTPLUS_BACK_LED_CHANNELS = range(0, 9)
+BOLTPLUS_FRONT_LED_CHANNELS = range(9, 18)
 
 from sphero_env.robot.connect import scan_and_connect
 from sphero_env.robot.robot import Robot
@@ -37,8 +44,9 @@ class SpheroRobotWrapperNode(Node):
         self.declare_parameter("collision_topic", "/sphero/collision")
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
+        self.declare_parameter("led_topic_prefix", "/sphero/led")
 
-        dt = float(self.get_parameter("dt").value)
+        dt =float(self.get_parameter("dt").value)
         max_steps = int(self.get_parameter("max_steps").value)
         vel_limit = float(self.get_parameter("vel_limit").value)
         goal_x = float(self.get_parameter("goal_x").value)
@@ -77,16 +85,94 @@ class SpheroRobotWrapperNode(Node):
         self._tf_broadcaster = TransformBroadcaster(self)
 
         self.create_subscription(Twist, self.cmd_vel_topic, self._on_twist, 10)
+
+        # LED control. Colours are std_msgs/ColorRGBA with r, g, b in [0, 1];
+        # alpha is ignored. The matrix character topic takes a single character.
+        led_prefix = str(self.get_parameter("led_topic_prefix").value).rstrip("/")
+        self._matrix_color = Color(255, 255, 255)
+        led_handlers = {
+            "main": lambda c: self._api.set_main_led(c),
+            "front": self._set_front_led,
+            "back": self._set_back_led,
+            "matrix": self._fill_matrix,
+        }
+        for name, handler in led_handlers.items():
+            self.create_subscription(
+                ColorRGBA,
+                f"{led_prefix}/{name}",
+                lambda msg, n=name, h=handler: self._on_led_color(n, h, msg),
+                10,
+            )
+        self.create_subscription(
+            String, f"{led_prefix}/matrix_char", self._on_matrix_char, 10
+        )
+
         self._timer = self.create_timer(dt, self._on_timer)
 
         self.get_logger().info(
             f"Robot wrapper started. Subscribing {self.cmd_vel_topic}, publishing "
-            f"{self.pose_topic}, {self.odom_topic}, {self.imu_topic}, and {self.collision_topic}."
+            f"{self.pose_topic}, {self.odom_topic}, {self.imu_topic}, and {self.collision_topic}. "
+            f"LED topics under {led_prefix}/(main|front|back|matrix|matrix_char)."
         )
 
     def _on_twist(self, msg: Twist):
         self._cmd_linear_x = float(msg.linear.x)
         self._cmd_linear_y = float(msg.linear.y)
+
+    @staticmethod
+    def _to_color(msg: ColorRGBA) -> Color:
+        def channel(v: float) -> int:
+            return int(round(min(max(float(v), 0.0), 1.0) * 255))
+
+        return Color(channel(msg.r), channel(msg.g), channel(msg.b))
+
+    def _raw_toy(self):
+        return getattr(self._api, "_SpheroEduAPI__toy", None)
+
+    def _set_boltplus_leds(self, channels: range, color: Color):
+        """Set a group of BOLT+ LEDs with one 32-bit-mask command."""
+        mask = 0
+        for channel in channels:
+            mask |= 1 << channel
+        # Values go in ascending channel order: r, g, b for each LED.
+        values = [color.r, color.g, color.b] * (len(channels) // 3)
+        IO.set_all_leds_with_32_bit_mask(
+            self._raw_toy(), mask, values, proc=Processors.PRIMARY
+        )
+
+    def _set_front_led(self, color: Color):
+        if isinstance(self._raw_toy(), BOLTPLUS):
+            self._set_boltplus_leds(BOLTPLUS_FRONT_LED_CHANNELS, color)
+        else:
+            self._api.set_front_led(color)
+
+    def _set_back_led(self, color: Color):
+        if isinstance(self._raw_toy(), BOLTPLUS):
+            self._set_boltplus_leds(BOLTPLUS_BACK_LED_CHANNELS, color)
+        else:
+            self._api.set_back_led(color)
+
+    def _fill_matrix(self, color: Color):
+        self._matrix_color = color
+        self._api.set_matrix_fill(0, 0, 7, 7, color)
+
+    def _on_led_color(self, name: str, handler, msg: ColorRGBA):
+        try:
+            handler(self._to_color(msg))
+        except Exception as exc:  # keep driving even if an LED call fails
+            self.get_logger().warn(f"Failed to set {name} LED: {exc}")
+
+    def _on_matrix_char(self, msg: String):
+        if not msg.data:
+            try:
+                self._api.clear_matrix()
+            except Exception as exc:
+                self.get_logger().warn(f"Failed to clear matrix: {exc}")
+            return
+        try:
+            self._api.set_matrix_character(msg.data[0], self._matrix_color)
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to set matrix character: {exc}")
 
     def _on_timer(self):
         speed, env_heading = ros_velocity_to_env_action(

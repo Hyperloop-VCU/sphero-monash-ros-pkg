@@ -1,4 +1,6 @@
 import math
+import threading
+import time
 from typing import Optional
 
 import numpy as np
@@ -45,6 +47,8 @@ class SpheroRobotWrapperNode(Node):
         self.declare_parameter("map_frame", "map")
         self.declare_parameter("base_frame", "base_link")
         self.declare_parameter("led_topic_prefix", "/sphero/led")
+        self.declare_parameter("sensor_interval_ms", 50)
+        self.declare_parameter("drive_keepalive", 0.1)
 
         dt =float(self.get_parameter("dt").value)
         max_steps = int(self.get_parameter("max_steps").value)
@@ -74,9 +78,28 @@ class SpheroRobotWrapperNode(Node):
         self.robot.reset()
         self.get_logger().info("Robot state initialized; starting ROS publishers and timer...")
 
+        sensor_interval_ms = int(self.get_parameter("sensor_interval_ms").value)
+        try:
+            self._raw_toy().sensor_control.set_interval(sensor_interval_ms)
+            self.get_logger().info(f"Sensor streaming every {sensor_interval_ms} ms")
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to set sensor interval: {exc}")
+
+        try:
+            self._api.reset_aim()
+        except Exception as exc:
+            self.get_logger().warn(f"Failed to reset aim: {exc}")
+
         self._cmd_linear_x: float = 0.0
         self._cmd_linear_y: float = 0.0
         self._last_published_yaw: Optional[float] = None
+
+        self._drive_keepalive = float(self.get_parameter("drive_keepalive").value)
+        self._drive_cond = threading.Condition()
+        self._wanted_drive = (0, 0)
+        self._drive_running = True
+        self._drive_thread = threading.Thread(target=self._drive_loop, daemon=True)
+        self._drive_thread.start()
 
         self._pose_pub = self.create_publisher(PoseStamped, self.pose_topic, 10)
         self._odom_pub = self.create_publisher(Odometry, self.odom_topic, 10)
@@ -118,6 +141,36 @@ class SpheroRobotWrapperNode(Node):
     def _on_twist(self, msg: Twist):
         self._cmd_linear_x = float(msg.linear.x)
         self._cmd_linear_y = float(msg.linear.y)
+        _, _, heading_deg, speed_raw = self.robot.action_to_command(self._current_action())
+        with self._drive_cond:
+            self._wanted_drive = (heading_deg, speed_raw)
+            self._drive_cond.notify()
+
+    def _current_action(self):
+        speed, env_heading = ros_velocity_to_env_action(
+            self._cmd_linear_x, self._cmd_linear_y
+        )
+        return np.array([speed, env_heading], dtype=np.float32)
+
+    def _drive_loop(self):
+        sent = None
+        sent_time = 0.0
+        while True:
+            with self._drive_cond:
+                if self._drive_running and self._wanted_drive == sent:
+                    self._drive_cond.wait(timeout=self._drive_keepalive)
+                if not self._drive_running:
+                    return
+                wanted = self._wanted_drive
+            now = time.monotonic()
+            if wanted == sent and now - sent_time < self._drive_keepalive:
+                continue
+            try:
+                self.robot.set_heading_and_speed(*wanted)
+                sent, sent_time = wanted, now
+            except Exception as exc:
+                self.get_logger().warn(f"Failed to send drive command: {exc}")
+                time.sleep(0.05)
 
     @staticmethod
     def _to_color(msg: ColorRGBA) -> Color:
@@ -175,12 +228,7 @@ class SpheroRobotWrapperNode(Node):
             self.get_logger().warn(f"Failed to set matrix character: {exc}")
 
     def _on_timer(self):
-        speed, env_heading = ros_velocity_to_env_action(
-            self._cmd_linear_x, self._cmd_linear_y
-        )
-        action = np.array([speed, env_heading], dtype=np.float32)
-
-        _, _, _, _, info = self.robot.step(action)
+        _, _, _, _, info = self.robot.step(self._current_action(), send_command=False)
 
         self._publish_state(info)
 
@@ -266,6 +314,10 @@ class SpheroRobotWrapperNode(Node):
         self._imu_pub.publish(imu_msg)
 
     def destroy_node(self):
+        with self._drive_cond:
+            self._drive_running = False
+            self._drive_cond.notify()
+        self._drive_thread.join(timeout=2.0)
         self.robot.close()
         super().destroy_node()
 

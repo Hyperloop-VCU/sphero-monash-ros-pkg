@@ -356,11 +356,26 @@ class Robot(gym.Env):
         self.last_collision_flag = 0.0
         return False
 
-    def step(self, action: np.ndarray):
+    def action_to_command(self, action: np.ndarray):
+        """Returns (speed_cmd, heading_cmd, heading_deg, speed_raw)."""
+        action = np.clip(action, self.action_space.low, self.action_space.high)
+        speed_cmd, heading_cmd = float(action[0]), float(action[1])
+        heading_cmd = self._wrap_angle(heading_cmd)
+
+        if speed_cmd < 0:
+            heading_deg = int(np.degrees(self._wrap_angle(heading_cmd + np.pi)) % 360)
+            speed_raw = int(np.clip(-speed_cmd/self.vel_limit * 255, 0, 255))
+        else:
+            heading_deg = int(np.degrees(heading_cmd) % 360)
+            speed_raw = int(np.clip(speed_cmd / self.vel_limit * 255, 0, 255))
+        return speed_cmd, heading_cmd, heading_deg, speed_raw
+
+    def step(self, action: np.ndarray, send_command: bool = True):
         """Execute one step with the real robot.
 
         Args:
             action: Action array [speed, heading].
+            send_command: If False, only read the robot's state.
 
         Returns:
             Observation, reward, terminated, truncated, info.
@@ -372,21 +387,11 @@ class Robot(gym.Env):
         if not self._use_custom_setpoint:
             self.current_setpoint = np.asarray(self.goal_pos, dtype=np.float32).copy()
 
-        # Clip action
-        action = np.clip(action, self.action_space.low, self.action_space.high)
-        speed_cmd, heading_cmd = float(action[0]), float(action[1])
-        heading_cmd = self._wrap_angle(heading_cmd)
-
-        # Convert to robot command
-        if speed_cmd < 0:
-            heading_deg = int(np.degrees(self._wrap_angle(heading_cmd + np.pi)) % 360)
-            speed_raw = int(np.clip(-speed_cmd/self.vel_limit * 255, 0, 255))
-        else:
-            heading_deg = int(np.degrees(heading_cmd) % 360)
-            speed_raw = int(np.clip(speed_cmd / self.vel_limit * 255, 0, 255))
+        speed_cmd, heading_cmd, heading_deg, speed_raw = self.action_to_command(action)
 
         # Send command
-        self.set_heading_and_speed(heading_deg, speed_raw)
+        if send_command:
+            self.set_heading_and_speed(heading_deg, speed_raw)
         self.last_command = (heading_cmd, speed_cmd, time.time())
 
         location = self.api.get_location()
